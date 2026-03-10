@@ -2,6 +2,18 @@
 
 All notable changes to MongoFire are documented here.
 
+## [6.5.3] — 2026-03-10
+
+### Fixed
+
+- CLI: `bin/` directory missing from npm package — CLI was absent after install
+- CLI: `inquirer` version pinned to `^8.0.0` (v9+ is ESM-only, broke CJS CLI)
+- CLI: `retryConflict()` was not resetting retry counter (no-op `$inc: 0`)
+- CLI: Network errors in delete version check were silently swallowed
+- CLI: `getSyncStatus()` now returns `realtime` field matching TypeScript types
+- CLI: `reconcile.js` multi-instance connection fix completed
+- CLI: Spurious "inquirer not found" hint removed from `npx mongofire init`
+
 ## [6.5.0] — 2026-03-08
 
 ### Fixed — Critical
@@ -64,16 +76,19 @@ All notable changes to MongoFire are documented here.
 ## [6.2.0] — 2026-03-08
 
 ### Fixed — Critical
+
 - **`start()` concurrent safety** — multiple simultaneous `start()` calls now share one init promise instead of racing
 - **Bootstrap re-trigger bug** — an empty collection no longer forces a full re-bootstrap of all collections
 - **Silent change tracking errors** — errors in the Mongoose hooks are now logged instead of swallowed
 - **Realtime sync not working** — change stream pipeline fix; was silently delivering zero events on most Atlas clusters
 
 ### Fixed — Medium
+
 - **`deleteMany` OOM risk** — plugin now streams and batches docs before deletion; removes 10,000-doc silent cap
 - **Session not forwarded in `updateOne` and `deleteOne` hooks** — reads now occur within the same transaction context
 
 ### Added
+
 - Full TypeScript declarations (`types/index.d.ts`) with typed events, config, and result interfaces
 - `require('mongofire/plugin')` subpath export
 - Max retry limit (10 attempts) for permanently failing operations
