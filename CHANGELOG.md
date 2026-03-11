@@ -2,6 +2,12 @@
 
 All notable changes to MongoFire are documented here.
 
+## [6.5.4] — 2026-03-10
+
+### Fixed
+
+- 🚀 Improved CLI speed, fixed multi-instance & network issues, and many more enhancements
+
 ## [6.5.3] — 2026-03-10
 
 ### Fixed
