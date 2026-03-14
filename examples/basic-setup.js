@@ -25,16 +25,15 @@ const Note = mongoose.model('Note', NoteSchema);
 
 // ── 3. Start MongoFire ────────────────────────────────────────────────────────
 async function main() {
+  // MongoFire auto-connects Mongoose to LOCAL_URI/DB_NAME and spawns mongod
+  // if it isn't already running. Do NOT call mongoose.connect() yourself.
   await mongofire.start({
-    localUri:  'mongodb://127.0.0.1:27017',
-    atlasUri:  process.env.ATLAS_URI,         // from .env
-    dbName:    'myapp',
+    localUri:  process.env.LOCAL_URI || 'mongodb://127.0.0.1:27017',
+    atlasUri:  process.env.ATLAS_URI,
+    dbName:    process.env.DB_NAME   || 'myapp',
     collections: ['notes'],
-    syncInterval: 30000,                      // sync every 30s
+    syncInterval: 30000,
   });
-
-  // Connect Mongoose to the same local MongoDB
-  await mongoose.connect('mongodb://127.0.0.1:27017/myapp');
 
   // ── 4. Use your app normally — MongoFire handles sync ────────────────────
   const note = await Note.create({
@@ -67,9 +66,8 @@ async function main() {
 
 main().catch(console.error);
 
-// Graceful shutdown
+// Graceful shutdown — mongofire.stop() disconnects Mongoose and stops mongod.
 process.on('SIGINT', async () => {
   await mongofire.stop();
-  await mongoose.disconnect();
   process.exit(0);
 });

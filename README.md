@@ -1,7 +1,7 @@
 # 🔥 MongoFire
 
 > **Offline-first MongoDB sync** — Local + Atlas feel like ONE database.
-> Automatic conflict resolution, Mongoose plugin, interactive CLI, zero boilerplate.
+> Drop-in production setup, automatic connection management, zero boilerplate.
 
 [![npm version](https://img.shields.io/npm/v/mongofire)](https://www.npmjs.com/package/mongofire)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
@@ -11,15 +11,24 @@
 
 ## What is MongoFire?
 
-MongoFire keeps a **local MongoDB** and **MongoDB Atlas** in sync — automatically, reliably, and with zero boilerplate. Your app reads and writes to a local MongoDB instance that is always fast and always available, even when offline. MongoFire handles everything else in the background.
+MongoFire keeps a **local MongoDB** and **MongoDB Atlas** in sync — automatically, reliably, and with zero boilerplate. Your app reads and writes to a local MongoDB instance that is always fast and always available, even when offline. MongoFire handles the rest in the background.
 
+> ⚡ **MongoFire manages every MongoDB connection for you.**
+> You never call `mongoose.connect()`. You never call `app.listen()` directly.
+> You import two functions — `startApp` and `plugin` — and everything else is automatic.
+
+**Features:**
 - **Offline-first** — your app never waits for the network
+- **Zero-config connection** — local MongoDB connects automatically on import
+- **`startApp(app, port)`** — replaces `app.listen()`, waits for DB, then opens the server
 - **Automatic sync** — uploads local changes and downloads remote ones on a configurable interval
 - **Real-time mode** — optional Atlas Change Streams for near-instant propagation
-- **Conflict resolution** — deterministic last-writer-wins with version tracking; conflict events for manual handling when needed
-- **Resumable bootstrap** — first sync streams from Atlas in batches; survives crashes and resumes exactly where it left off
-- **Self-healing** — detects and recovers lost writes caused by crashes, local DB resets, or partial failures automatically
-- **CLI tools** — interactive commands for status, conflict resolution, reconciliation, and safe local reset
+- **Conflict resolution** — deterministic last-writer-wins with version tracking
+- **Per-field merge** — field-level LWW prevents data loss when devices edit different fields simultaneously
+- **Resumable bootstrap** — first sync streams from Atlas in batches, survives crashes
+- **Self-healing** — detects and recovers lost writes caused by crashes or local DB resets
+- **Auto-spawn mongod** — if MongoDB is not running, MongoFire starts it automatically
+- **CLI tools** — interactive commands for status, conflicts, reconciliation, and safe reset
 - **TypeScript** — full type declarations included
 
 ---
@@ -30,7 +39,7 @@ MongoFire keeps a **local MongoDB** and **MongoDB Atlas** in sync — automatica
 npm install mongofire
 ```
 
-**Peer dependencies:**
+**Peer dependencies** (install once in your project):
 
 ```bash
 npm install mongodb mongoose dotenv
@@ -38,21 +47,23 @@ npm install mongodb mongoose dotenv
 
 ---
 
-## Quick Start
+## Quick Start (3 steps)
 
-### 1. Run the setup wizard
+### Step 1 — Run the setup wizard
 
 ```bash
 npx mongofire init
 ```
 
-The interactive wizard creates three files:
+This creates three files in your project root:
 
-- `.env` — MongoDB connection strings
-- `mongofire.config.js` — which collections to sync, intervals, and options
-- `mongofire.js` — imports config and starts sync
+| File | Purpose |
+|---|---|
+| `.env` | MongoDB connection strings |
+| `mongofire.config.js` | Collections to sync, intervals, options |
+| `mongofire.js` | The MongoFire entry point — **do not delete** |
 
-### 2. Fill in `.env`
+### Step 2 — Fill in `.env`
 
 ```env
 ATLAS_URI=mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net/
@@ -60,434 +71,350 @@ LOCAL_URI=mongodb://127.0.0.1:27017
 DB_NAME=myapp
 ```
 
-### 3. Import mongofire.js in your app entry point
+> `ATLAS_URI` is optional — omit it to run in local-only mode during development.
 
-```js
-// CommonJS
-require("./mongofire");
-const mongofire = require("mongofire");
-```
+### Step 3 — Use MongoFire in your project
+
+**`server.js` — your Express entry point:**
 
 ```js
 // ESM
-import "./mongofire.js";
-import mongofire from "mongofire";
+import express from 'express';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import { startApp } from './mongofire.js';   // ← import from YOUR mongofire.js
+
+import authRoutes    from './routes/auth.routes.js';
+import studentRoutes from './routes/student.routes.js';
+
+const app = express();
+app.use(express.json());
+app.use(cookieParser());
+app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true }));
+
+app.use('/auth',     authRoutes);
+app.use('/students', studentRoutes);
+
+// ✅ Replaces app.listen() — waits for local DB then starts the server
+startApp(app, process.env.PORT || 3000);
 ```
 
-### 4. Add the plugin to your Mongoose schemas
+```js
+// CommonJS
+const express = require('express');
+const { startApp } = require('./mongofire');
+
+const app = express();
+app.use(express.json());
+
+app.use('/auth', require('./routes/auth.routes'));
+
+startApp(app, process.env.PORT || 3000);
+```
+
+**`models/User.js` — attach the plugin to your Mongoose schemas:**
 
 ```js
-const mongofire = require("mongofire");
+// ESM — from a file inside models/
+import mongoose from 'mongoose';
+import { plugin } from '../mongofire.js';   // ← note: ../ because models/ is one level deep
 
-const OrderSchema = new mongoose.Schema({
-  items: Array,
-  total: Number,
+const UserSchema = new mongoose.Schema({
+  name:      String,
+  email:     { type: String, unique: true },
   updatedAt: Date,
 });
 
-OrderSchema.plugin(mongofire.plugin("orders")); // <— must be BEFORE creating the model
+UserSchema.plugin(plugin('users'));  // collection name must match mongofire.config.js
 
-const Order = mongoose.model("Order", OrderSchema);
+export default mongoose.model('User', UserSchema);
 ```
 
-Every `save()`, `create()`, `update()`, and `delete()` is now tracked and synced automatically.
+```js
+// CommonJS — from a file inside models/
+const mongoose = require('mongoose');
+const { plugin } = require('../mongofire');   // ← note: ../ one level up
+
+const StudentSchema = new mongoose.Schema({
+  name:      String,
+  grade:     Number,
+  updatedAt: Date,
+});
+
+StudentSchema.plugin(plugin('students'));
+
+module.exports = mongoose.model('Student', StudentSchema);
+```
+
+> **Critical:** The import path is always a **relative path** to `mongofire.js` in your project root.
+> It is **never** `'mongofire'` (the npm package name).
+> From `server.js` (root) → `'./mongofire.js'`
+> From `models/User.js` (one level deep) → `'../mongofire.js'`
 
 ---
 
-## Config Options
+## Project folder structure
+
+```
+backend/
+├── mongofire.js          ← Generated by init — the bridge between your app and MongoFire
+├── mongofire.config.js   ← Your sync configuration
+├── .env                  ← Connection strings (never commit this)
+├── server.js             ← import { startApp } from './mongofire.js'
+├── models/
+│   ├── User.js           ← import { plugin } from '../mongofire.js'
+│   └── Student.js        ← import { plugin } from '../mongofire.js'
+└── routes/
+    ├── auth.routes.js
+    └── student.routes.js
+```
+
+---
+
+## What `startApp()` does
+
+`startApp(app, port)` replaces `app.listen()`. It:
+
+1. Waits for local MongoDB to be fully connected
+2. Calls `app.listen(port)` only after the DB is ready
+3. Logs `🚀 [MongoFire] Server ready on port <port>` on success
+4. If the local DB fails: logs a descriptive error and exits with code 1
+
+**Console output on startup:**
+
+```
+✅ [MongoFire] Local MongoDB connected
+🚀 [MongoFire] Server ready on port 3000
+🌐 [MongoFire] Atlas connected — sync active
+🔄 [MongoFire] Sync complete — ↑2 uploaded  ↓5 downloaded  🗑 0 deleted
+```
+
+---
+
+## Config Options (`mongofire.config.js`)
 
 ```js
-// mongofire.config.js
-module.exports = {
-  localUri: process.env.LOCAL_URI || "mongodb://127.0.0.1:27017",
-  atlasUri: process.env.ATLAS_URI,
-  dbName: process.env.DB_NAME || "myapp",
+export default {
+  localUri:  process.env.LOCAL_URI || 'mongodb://127.0.0.1:27017',
+  atlasUri:  process.env.ATLAS_URI,
+  dbName:    process.env.DB_NAME   || 'myapp',
 
-  collections: ["orders", "products", "users"],
+  collections: ['users', 'students', 'orders'],  // every collection your app uses
 
-  syncInterval: 30000, // ms between sync cycles (default: 30 s)
-  batchSize: 200, // documents per batch
-  syncOwner: "*", // '*' = sync all data (default)
-  realtime: false, // enable Atlas Change Streams
+  syncInterval: 30000,   // ms between sync cycles (minimum 500)
+  batchSize:    200,
+  syncOwner:    '*',     // '*' = sync all  |  'userId' = per-user isolation
+  realtime:     false,   // true = Atlas Change Streams
+  cleanDays:    7,
 
   onSync(result) {
-    if (result.uploaded + result.downloaded + result.deleted > 0) {
-      console.log(`Synced: up:${result.uploaded} down:${result.downloaded}`);
-    }
+    if (result.uploaded + result.downloaded + result.deleted > 0)
+      console.log(`Synced: ↑${result.uploaded} ↓${result.downloaded}`);
   },
-  onError(err) {
-    console.error("Sync error:", err.message);
-  },
+  onError(err) { console.error('Sync error:', err.message); },
 };
 ```
 
-### All config fields
+| Option              | Type           | Default                              | Description                                             |
+|---------------------|----------------|--------------------------------------|---------------------------------------------------------|
+| `collections`       | `string[]`     | **required**                         | Collection names to sync                                |
+| `localUri`          | `string`       | `'mongodb://127.0.0.1:27017'`        | Local MongoDB URI                                       |
+| `atlasUri`          | `string`       | `null`                               | Atlas URI. Omit for local-only mode                     |
+| `dbName`            | `string`       | `'myapp'`                            | Database name                                           |
+| `syncInterval`      | `number`       | `30000` (`5000` if `realtime:true`)  | Polling interval in ms (minimum: 500)                   |
+| `batchSize`         | `number`       | `200`                                | Documents per batch (1–10 000)                          |
+| `syncOwner`         | `string\|fn`   | `'*'`                                | Owner filter — see Multi-Tenant section                 |
+| `realtime`          | `boolean`      | `false`                              | Enable Atlas Change Streams                             |
+| `cleanDays`         | `number`       | `7`                                  | Auto-clean synced records older than N days             |
+| `onSync`            | `function`     | `null`                               | Called after each sync cycle                            |
+| `onError`           | `function`     | `null`                               | Called when a sync cycle throws                         |
+| `reconcileOnStart`  | `boolean`      | `true`                               | Scan for lost writes at startup                         |
 
-| Option              | Type           | Default                       | Description                                      |
-| ------------------- | -------------- | ----------------------------- | ------------------------------------------------ |
-| `collections`       | `string[]`     | required                      | Collection names to sync                         |
-| `localUri`          | `string`       | `'mongodb://localhost:27017'` | Local MongoDB URI                                |
-| `atlasUri`          | `string`       | `null`                        | Atlas URI. Omit for local-only mode              |
-| `dbName`            | `string`       | `'mongofire'`                 | Database name                                    |
-| `syncInterval`      | `number`       | `30000`                       | Polling interval in ms                           |
-| `batchSize`         | `number`       | `200`                         | Documents per upload/download batch              |
-| `syncOwner`         | `string \| fn` | `'*'`                         | Owner filter. See [Multi-Tenant](#multi-tenant)  |
-| `realtime`          | `boolean`      | `false`                       | Enable Atlas Change Streams for instant sync     |
-| `onSync`            | `function`     | `null`                        | Called after each sync cycle with a `SyncResult` |
-| `onError`           | `function`     | `null`                        | Called when a sync cycle throws                  |
-| `reconcileOnStart`  | `boolean`      | `true`                        | Scan for lost writes at startup                  |
-| `reconcileFullScan` | `boolean`      | `true`                        | Include deep phase of reconciliation             |
+---
+
+## Common import mistakes
+
+### ❌ Wrong — using the npm package name
+
+```js
+import { plugin } from 'mongofire';       // ❌ ERR_MODULE_NOT_FOUND
+const { plugin } = require('mongofire');  // ❌ wrong unless mongofire is installed globally
+```
+
+### ✅ Correct — relative path to your local mongofire.js
+
+```js
+// server.js (same folder as mongofire.js)
+import { startApp, plugin } from './mongofire.js';
+
+// models/User.js (one folder deep)
+import { plugin } from '../mongofire.js';
+
+// routes/user.routes.js (one folder deep)
+import { plugin } from '../mongofire.js';
+```
 
 ---
 
 ## Events
 
 ```js
-mongofire.on("ready", () => console.log("MongoFire started"));
-mongofire.on("online", () => console.log("Atlas connected"));
-mongofire.on("offline", () => console.log("Working locally"));
-mongofire.on("sync", (r) => console.log("Sync result:", r));
-mongofire.on("conflict", (c) => console.warn("Conflict:", c));
-mongofire.on("conflictResolved", (d) => console.log("Resolved:", d.opId));
-mongofire.on("reconcileComplete", (r) =>
-  console.log("Re-queued:", r.totalQueued),
-);
-mongofire.on("realtimeStarted", () => console.log("Change streams active"));
-mongofire.on("realtimeStopped", () => console.log("Realtime stopped"));
-mongofire.on("stopped", () => console.log("Shut down cleanly"));
-mongofire.on("error", (e) => console.error("Error:", e));
+import { mongofire } from './mongofire.js';
+
+mongofire.on('localReady', () => console.log('Local DB connected'));
+mongofire.on('online',     () => console.log('Atlas connected'));
+mongofire.on('offline',    () => console.log('Working offline'));
+mongofire.on('sync',       (r) => console.log('Synced:', r));
+mongofire.on('conflict',   (c) => console.warn('Conflict:', c));
+mongofire.on('error',      (e) => console.error('Error:', e));
+mongofire.on('stopped',    ()  => console.log('Shut down cleanly'));
 ```
 
-| Event               | Payload                        | When emitted                               |
-| ------------------- | ------------------------------ | ------------------------------------------ |
-| `ready`             | —                              | `start()` completed                        |
-| `online`            | —                              | Atlas connection established               |
-| `offline`           | —                              | Atlas becomes unreachable                  |
-| `sync`              | `SyncResult`                   | After each sync cycle                      |
-| `conflict`          | `ConflictData`                 | Local write conflicts with remote          |
-| `conflictResolved`  | `{ opId, resolution }`         | After `retryConflict` or `dismissConflict` |
-| `reconcileComplete` | `{ collections, totalQueued }` | After reconciliation scan                  |
-| `realtimeStarted`   | —                              | Change streams activated                   |
-| `realtimeStopped`   | —                              | Change streams stopped                     |
-| `stopped`           | —                              | `stop()` finished                          |
-| `error`             | `Error`                        | Unexpected sync error                      |
+| Event              | Payload                        | When emitted                           |
+|--------------------|--------------------------------|----------------------------------------|
+| `localReady`       | `Db`                           | Local MongoDB connected (before Atlas) |
+| `ready`            | —                              | `start()` fully completed              |
+| `online`           | —                              | Atlas connected                        |
+| `offline`          | —                              | Atlas becomes unreachable              |
+| `sync`             | `SyncResult`                   | After each sync cycle                  |
+| `conflict`         | `ConflictData`                 | Local write conflicts with remote      |
+| `conflictResolved` | `{ opId, resolution }`         | After retry or dismiss                 |
+| `stopped`          | —                              | `stop()` finished                      |
+| `error`            | `Error`                        | Unexpected sync error                  |
 
 ---
 
-## API
+## API Reference
 
-### `mongofire.start(config)` → `Promise<MongoFire>`
+### `startApp(app, port)` → `Promise<http.Server>`
 
-Connect to local MongoDB and Atlas, run the initial sync, start background polling. Safe to call multiple times — concurrent calls share the same init promise.
+Replaces `app.listen()`. Waits for local DB, then opens the server port. Exits with code 1 on DB failure.
 
-### `mongofire.stop(timeoutMs?)` → `Promise<void>`
+```js
+import { startApp } from './mongofire.js';
+startApp(app, process.env.PORT || 3000);
+```
 
-Flush any in-flight operations and close all connections. Default timeout: **10,000 ms**.
+### `plugin(collectionName, options?)` → Mongoose plugin function
+
+Attaches change-tracking to a schema. Apply **before** `mongoose.model()`.
+
+```js
+import { plugin } from '../mongofire.js';
+UserSchema.plugin(plugin('users'));
+UserSchema.plugin(plugin('users', { ownerField: 'userId' }));  // multi-tenant
+```
+
+### `localReady` → `Promise<Db>`
+
+Resolves as soon as local MongoDB is connected, before Atlas.
+
+```js
+import { localReady } from './mongofire.js';
+await localReady;  // DB is guaranteed ready after this
+```
+
+### `ready` → `Promise<MongoFire>`
+
+Resolves after Atlas connect and the first sync.
 
 ### `mongofire.sync(type?)` → `Promise<SyncResult>`
 
-Manually trigger a sync. Returns `{ error: 'offline', pending }` when Atlas is unreachable. Throttled to a minimum of 500 ms between calls.
-
-| `type`       | Behaviour                                           |
-| ------------ | --------------------------------------------------- |
-| `'required'` | Upload pending ops + download new changes (default) |
-| `'all'`      | Full bi-directional sync                            |
+Manually trigger a sync (`'required'` or `'all'`).
 
 ### `mongofire.status()` → `Promise<SyncStatus>`
 
-```ts
-interface SyncStatus {
-  online: boolean;
-  pending: number; // total unsynced operations
-  creates: number;
-  updates: number;
-  deletes: number;
-  realtime: boolean;
-}
-```
+Returns `{ online, pending, creates, updates, deletes, realtime }`.
 
-### `mongofire.clean(days?, opts?)` → `Promise<number>`
+### `mongofire.conflicts()` / `retryConflict(opId)` / `dismissConflict(opId)`
 
-Delete old synced records to keep the local database tidy.
+View and resolve sync conflicts.
 
-| Parameter           | Default        | Description                                     |
-| ------------------- | -------------- | ----------------------------------------------- |
-| `days`              | `7`            | Delete synced records older than N days         |
-| `opts.conflictDays` | same as `days` | Delete stale conflict records older than N days |
+### `mongofire.reconcile(opts?)` → `Promise<ReconcileResult[]>`
 
-### `mongofire.conflicts(collection?)` → `Promise<ConflictRecord[]>`
-
-```js
-const list = await mongofire.conflicts();
-for (const c of list) {
-  console.log(`${c.collection}/${c.docId}  op:${c.type}  v${c.version}`);
-  console.log("Error:", c.lastError);
-}
-```
-
-### `mongofire.retryConflict(opId)` → `Promise<void>`
-
-Reset a conflict back to pending so the next sync retries it. Emits `conflictResolved` with `resolution: 'retried'`.
-
-### `mongofire.dismissConflict(opId)` → `Promise<void>`
-
-Dismiss a conflict — remote version wins and the local change is discarded. Emits `conflictResolved` with `resolution: 'dismissed'`.
-
-### `mongofire.reconcile(collectionOrOpts?, opts?)` → `Promise<ReconcileResult[]>`
-
-Scan for writes lost in a crash and re-queue them for sync.
-
-```js
-await mongofire.reconcile(); // all collections
-await mongofire.reconcile({ fullScan: false }); // fast scan only
-await mongofire.reconcile("orders"); // single collection
-```
-
-| Phase   | What it checks                                          |
-| ------- | ------------------------------------------------------- |
-| Phase 1 | Metadata rows with no matching operation entry          |
-| Phase 2 | Data documents with no metadata entry (`fullScan` only) |
+Scan for and recover writes lost in a crash.
 
 ### `mongofire.resetLocal()` → `Promise<{ dropped: number }>`
 
-Safely wipe the entire local database and all MongoFire state. The next `start()` re-bootstraps from Atlas cleanly.
+Wipe the local DB. Next startup re-bootstraps from Atlas. **Unsynced changes are lost.**
 
-```js
-// Check for unsynced changes first
-const { pending } = await mongofire.status();
-if (pending > 0) {
-  console.warn(`${pending} unsynced operations will be lost`);
-}
+### `mongofire.stop(timeoutMs?)` → `Promise<void>`
 
-const { dropped } = await mongofire.resetLocal();
-console.log(
-  `Wiped ${dropped} collections. Restart to re-bootstrap from Atlas.`,
-);
-```
-
-> **Warning:** Any unsynced local changes are permanently lost. Use `mongofire.status()` first if you need to verify there is nothing pending.
-
-### `mongofire.plugin(collectionName, options?)`
-
-```js
-// Basic
-OrderSchema.plugin(mongofire.plugin("orders"));
-
-// With options
-UserSchema.plugin(
-  mongofire.plugin("users", {
-    ownerField: "userId", // required only for multi-tenant
-    batchSize: 200,
-    concurrency: 8,
-  }),
-);
-```
-
-| Option        | Type     | Default | Description                                           |
-| ------------- | -------- | ------- | ----------------------------------------------------- |
-| `ownerField`  | `string` | `null`  | Dot-path to owner field. Only needed for multi-tenant |
-| `batchSize`   | `number` | `200`   | Batch size for bulk operations                        |
-| `concurrency` | `number` | `8`     | Concurrent tracking calls per batch                   |
+Flush in-flight ops and close connections. Called automatically on `SIGINT`/`SIGTERM`.
 
 ---
 
 ## Real-Time Sync
 
-Enable Atlas Change Streams for near-instant propagation between devices:
-
 ```js
-await mongofire.start({
-  atlasUri: process.env.ATLAS_URI,
-  collections: ["orders"],
-  realtime: true, // requires Atlas M10+ or a local replica set
-  syncInterval: 5000, // polling fallback interval
-});
-
-mongofire.on("realtimeStarted", () => console.log("Changes appear instantly"));
+// mongofire.config.js
+export default {
+  atlasUri:     process.env.ATLAS_URI,
+  collections:  ['orders'],
+  realtime:     true,    // requires Atlas M10+ or a local replica set
+  syncInterval: 5000,    // polling fallback
+};
 ```
 
-Falls back to polling automatically if Change Streams are unavailable.
+Falls back to polling if Change Streams are unavailable. Saves a resume token — restarts pick up exactly where they left off. Restarts use exponential backoff (2 s → 60 s).
 
 ---
 
 ## Multi-Tenant
 
-> **Most apps do not need this.**
-> If all users share the same data — a café, a team app, a single company — use the default `syncOwner: '*'` and skip this section entirely.
-
-Multi-tenant mode is for apps where **each user must only sync their own private data**.
-
-### Do you need it?
-
-| App type                           | Need multi-tenant?        |
-| ---------------------------------- | ------------------------- |
-| Café / restaurant system           | No — staff share data     |
-| Single-company team app            | No — everyone shares data |
-| SaaS with per-tenant isolation     | **Yes**                   |
-| Per-user notes / tasks             | **Yes**                   |
-| Ride-hailing — each driver's data  | **Yes**                   |
-| Multi-school, each school isolated | **Yes**                   |
-
-### Setup (4 steps)
-
-**Step 1 — Add an owner field to every synced model**
+For apps where each user must only sync their own data:
 
 ```js
-const OrderSchema = new mongoose.Schema({
-  items: Array,
-  total: Number,
-  userId: { type: mongoose.Types.ObjectId, required: true },
-  updatedAt: Date,
-});
-
-OrderSchema.plugin(mongofire.plugin("orders", { ownerField: "userId" }));
-```
-
-**Step 2 — Set `syncOwner` in config**
-
-```js
-module.exports = {
-  collections: ["orders", "products"],
-  syncOwner: "userId",
-  // ...
+// mongofire.config.js
+export default {
+  collections: ['notes'],
+  syncOwner: () => currentUserId,  // returns the current user's ID
 };
 ```
 
-**Step 3 — Pass the current user's ID when starting sync**
-
 ```js
-async function login(req, res) {
-  const user = await User.findOne({ email: req.body.email });
-  // ... password check ...
-
-  await mongofire.start({
-    ...config,
-    syncOwner: user._id.toString(),
-  });
-
-  res.json({ token, user });
-}
-
-async function logout(req, res) {
-  await mongofire.stop();
-  res.json({ message: "Logged out" });
-}
-```
-
-**Step 4 — Always set the owner field when creating documents**
-
-```js
-const order = await Order.create({
-  items: req.body.items,
-  total: req.body.total,
-  userId: req.user._id,
-});
-```
-
-### Dynamic owner using a function
-
-```js
-await mongofire.start({
-  ...config,
-  syncOwner: () => getCurrentUser()?.id ?? null,
-});
-```
-
-> **Security note:** If `syncOwner` is a function and it throws, the sync is **aborted** and an `error` event is emitted. MongoFire never falls back to syncing all data on error.
-
----
-
-## Using the plugin directly (without the MongoFire instance)
-
-```js
-// CommonJS
-const mongofirePlugin = require("mongofire/plugin");
-OrderSchema.plugin(mongofirePlugin, { collection: "orders" });
-
-// CommonJS factory
-const { factory } = require("mongofire/plugin");
-OrderSchema.plugin(factory("orders"));
+// model
+NoteSchema.plugin(plugin('notes', { ownerField: 'userId' }));
 ```
 
 ```js
-// ESM
-import mongofirePlugin, { factory } from "mongofire/plugin";
-OrderSchema.plugin(factory("orders"));
+// create — always set the owner field
+await Note.create({ title: 'My note', userId: req.user._id });
 ```
-
----
-
-## Safe Local Reset
-
-If the local database is cleared or corrupted, MongoFire automatically detects and resolves any stale pending operations during the next bootstrap — no manual conflict resolution, no stuck queues.
-
-For a deliberate clean reset, use either:
-
-```bash
-# Interactive CLI — confirms before wiping
-npx mongofire reset-local
-```
-
-```js
-// Programmatic
-const { dropped } = await mongofire.resetLocal();
-```
-
-Both drop all local data and MongoFire state so the next startup re-bootstraps from Atlas cleanly.
 
 ---
 
 ## CLI Reference
 
 ```bash
-npx mongofire init                               # Interactive setup wizard
-npx mongofire init --force                       # Overwrite existing files
-npx mongofire init --esm                         # Force ESM output
-npx mongofire init --cjs                         # Force CommonJS output
-npx mongofire config                             # Update an existing config
-npx mongofire status                             # Show pending sync counts
-npx mongofire clean                              # Delete old records (interactive)
-npx mongofire clean --days=14                    # Delete records older than 14 days
-npx mongofire conflicts                          # View and resolve conflicts
-npx mongofire reconcile                          # Recover writes lost from crashes
-npx mongofire reconcile --no-full-scan           # Fast scan (Phase 1 only)
-npx mongofire reconcile --collection=orders      # Single collection
-npx mongofire reset-local                        # Safely wipe local DB and re-bootstrap
+npx mongofire init                          # Setup wizard (creates mongofire.js, config, .env)
+npx mongofire init --force                  # Overwrite existing files
+npx mongofire init --esm                    # Force ESM output
+npx mongofire init --cjs                    # Force CJS output
+npx mongofire config                        # Update config interactively
+npx mongofire status                        # Show pending sync counts
+npx mongofire clean --days=7                # Delete records older than 7 days
+npx mongofire conflicts                     # View and resolve conflicts
+npx mongofire reconcile                     # Recover writes lost from crashes
+npx mongofire reconcile --collection=users  # Single collection
+npx mongofire reset-local                   # Wipe local DB and re-bootstrap
 ```
 
-| Command       | Description                                               | TTY required? | Key flags                             |
-| ------------- | --------------------------------------------------------- | ------------- | ------------------------------------- |
-| `init`        | Setup wizard                                              | Optional      | `--esm`, `--cjs`, `--force`           |
-| `config`      | Update an existing config                                 | Yes           | —                                     |
-| `status`      | Show pending ops and online state                         | No            | —                                     |
-| `clean`       | Delete old sync records                                   | Optional      | `--days=N` (1–3650, default 7)        |
-| `conflicts`   | View and resolve conflicts interactively                  | Yes           | —                                     |
-| `reconcile`   | Recover writes lost from crashes                          | No            | `--no-full-scan`, `--collection=NAME` |
-| `reset-local` | Wipe local DB and all sync state for a clean re-bootstrap | Yes           | —                                     |
-
-> **Tip:** Set `MONGOFIRE_DEBUG=1` for full error stack traces in any command.
+> Set `MONGOFIRE_DEBUG=1` for full error stack traces.
 
 ---
 
 ## TypeScript
 
 ```ts
-import mongofire, { SyncConfig, SyncResult, ConflictData } from "mongofire";
+import { startApp, plugin, mongofire } from './mongofire.js';
+import type { SyncResult, ConflictData } from 'mongofire';
 
-const config: SyncConfig = {
-  collections: ["orders", "products"],
-  atlasUri: process.env.ATLAS_URI,
-  realtime: true,
-};
+UserSchema.plugin(plugin('users'));
+startApp(app, 3000);
 
-await mongofire.start(config);
-
-mongofire.on("sync", (result: SyncResult) => {
-  console.log(`up:${result.uploaded} down:${result.downloaded}`);
-});
-
-mongofire.on("conflict", (c: ConflictData) => {
-  console.warn(`Conflict: ${c.collection}/${c.docId} op:${c.op}`);
+mongofire.on('sync', (result: SyncResult) => {
+  console.log(`↑${result.uploaded} ↓${result.downloaded}`);
 });
 ```
 
@@ -495,24 +422,51 @@ mongofire.on("conflict", (c: ConflictData) => {
 
 ## Environment Variables
 
-| Variable                           | Default | Description                                          |
-| ---------------------------------- | ------- | ---------------------------------------------------- |
-| `MONGOFIRE_DEBUG`                  | unset   | Set to `1` for full error stack traces               |
-| `MONGOFIRE_VERIFY_REMOTE`          | `0`     | Set to `1` to checksum-verify each uploaded document |
-| `MONGOFIRE_COLLECTION_CONCURRENCY` | `4`     | Collections synced in parallel (capped at 32)        |
+| Variable                           | Default                  | Description                                          |
+|------------------------------------|--------------------------|------------------------------------------------------|
+| `ATLAS_URI`                        | —                        | MongoDB Atlas connection string                      |
+| `LOCAL_URI`                        | `mongodb://127.0.0.1:27017` | Local MongoDB URI                                 |
+| `DB_NAME`                          | `myapp`                  | Database name                                        |
+| `MONGOFIRE_DEBUG`                  | unset                    | Set to `1` for full stack traces                     |
+| `MONGOFIRE_VERIFY_REMOTE`          | `0`                      | Set to `1` to checksum-verify each uploaded document |
+| `MONGOFIRE_COLLECTION_CONCURRENCY` | `4`                      | Collections synced in parallel (max 32)              |
+| `MONGOFIRE_DBPATH`                 | `~/.mongofire/<dbName>`  | Data directory for auto-spawned mongod               |
 
 ---
 
-## Collection Name Rules
+## Troubleshooting
 
-Names must:
+### `ERR_MODULE_NOT_FOUND: Cannot find package 'mongofire'`
 
-- Start with a letter or digit
-- Contain only letters, digits, `_`, `-`, or `.`
-- **Not** contain `:` — causes internal key collisions
-- **Not** start with `_mf_` — reserved prefix
+You are importing `from 'mongofire'` instead of `from './mongofire.js'`.
 
-Invalid names are rejected at startup with a clear error message.
+```js
+// ❌ Wrong
+import { plugin } from 'mongofire';
+
+// ✅ Correct (from project root)
+import { plugin } from './mongofire.js';
+
+// ✅ Correct (from models/ folder)
+import { plugin } from '../mongofire.js';
+```
+
+### `mongoose.connect() should not be called`
+
+Remove any `mongoose.connect()` calls from your code. MongoFire manages the connection through `localUri` in `mongofire.config.js`.
+
+### `Local MongoDB failed to connect`
+
+- MongoDB is not installed — [download here](https://www.mongodb.com/try/download/community)
+- `mongod` is not in your system PATH
+- `LOCAL_URI` in `.env` is incorrect
+- Port 27017 is blocked by a firewall
+
+MongoFire tries to auto-spawn `mongod`. Set `MONGOFIRE_DBPATH` to a writable directory if the default fails.
+
+### `Cannot find module './mongofire.config.js'`
+
+Run `npx mongofire init` to regenerate the config file.
 
 ---
 
